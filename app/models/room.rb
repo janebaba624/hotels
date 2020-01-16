@@ -30,21 +30,30 @@ class Room < ApplicationRecord
             next if removed_due_same_lvl_locking.include?(room_unit.part_of_room_id)
             removed_due_same_lvl_locking << room_unit.part_of_room_id
           end
+
+          if room_unit.part_of_room_id
+            same_lvl_connected_bookings = room_units.where(part_of_room_id: room_unit.part_of_room_id).map do |ru|
+              assigns[ru.id]
+            end.flatten
+          else
+            same_lvl_connected_bookings = []
+          end
+
           connected_bookings = connected_bookings_for(room_unit)
-          !(booking_set + connected_bookings).any? { |b| b.dtstart <= date && b.dtend > date }
+          !(same_lvl_connected_bookings + booking_set + connected_bookings).any? { |b| b.dtstart <= date && b.dtend > date }
 				}.keys
 
 				{
 					date: date,
 					allotment: available_rooms.count,
-					rooms: available_rooms.map {|id| RoomUnit.find(id).room_no}.join(", ")
+					rooms: available_rooms.join(', ') #.map {|id| RoomUnit.find(id).room_no}.join(", ")
 				}
 			end
 		}
 	end
 
 	def available_between?(dtstart, dtend, booking_id = nil, room_unit_id = nil)
-		new_booking = Booking.new(id: booking_id || -1, dtstart: dtstart, dtend: dtend, room: self, room_unit_id: room_unit_id)
+		new_booking = Booking.new(id: booking_id, dtstart: dtstart, dtend: dtend, room: self, room_unit_id: room_unit_id)
 		return false unless assign_rooms([new_booking])[0]
 
 		leaf_rooms = []
@@ -61,11 +70,11 @@ class Room < ApplicationRecord
 		nb_rooms = room_units.count
 		assigns = room_units.inject({}) { |h, u| h.merge!(u.id => []) }
 		# TODO: past bookings should not be considered due performance
-		if extra_bookings.blank?
+		if extra_bookings.all? { |b| b.new_record? }
 			room_bookings = Booking.where(room_id: self.id).to_a
 		else
 			room_bookings = Booking.where(room_id: self.id)
-														.where(Booking.arel_table[:id].not_in extra_bookings.map(&:id)).to_a
+														.where(Booking.arel_table[:id].not_in extra_bookings.map(&:id).compact).to_a
 		end
 		sorted_bookings = (room_bookings + extra_bookings.select{|b| b.room_id == self.id}).sort { |a, b| a.dtstart <=> b.dtstart }
 
@@ -120,6 +129,17 @@ class Room < ApplicationRecord
 							(sorted_bookings[j].dtstart < b.dtstart && b.dtend < sorted_bookings[j].dtend)
 						}
 					}
+
+          # in case of room consists of part rooms
+          if sorted_bookings[j].new_record?
+            does_not_affect_sub_rooms = room_unit.consist_of_rooms.group(:room_id).any? do |sr|
+              test_room = sorted_bookings[j].dup
+              test_room.room = sr.room
+              test_room.room_unit = sr
+              !sr.room.assign_rooms([test_room])[0]
+            end
+            next if does_not_affect_sub_rooms
+          end
 
 					if end_date <= sorted_bookings[j].dtstart
 						graph.add_edge(i, j, ((sorted_bookings[j].dtstart - end_date) / 1.day).to_i)
